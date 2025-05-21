@@ -1,68 +1,76 @@
-
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import altair as alt
 
-st.set_page_config(layout="wide")
-st.title("🏋️‍♂️ Workouts & 🫀 AFib Events Dashboard (2025)")
+# Load the enriched workout data
+@st.cache_data
+def load_data():
+    df = pd.read_csv("cleaned_workouts_with_afib_2025_filtered.csv", parse_dates=["start", "end"], low_memory=False)
+    df = df[df["start"].dt.year == 2025]  # Only show 2025 workouts
+    return df
 
-# Load data
-df = pd.read_csv("cleaned_workouts_with_afib_2025_filtered.csv", parse_dates=["workout_start", "first_afib", "last_afib"])
-df["date"] = df["workout_start"].dt.date
+df = load_data()
 
-# Sidebar filters
+st.title("🏋️‍♂️ Workout & Heart Rate Dashboard (2025)")
+
+# Sidebar: filters
 st.sidebar.header("Filters")
-date_range = st.sidebar.date_input("Date Range", [df["workout_start"].min(), df["workout_start"].max()])
-workout_types = st.sidebar.multiselect("Workout Types", options=df["workout_type"].dropna().unique(), default=list(df["workout_type"].dropna().unique()))
+start_date = st.sidebar.date_input("Start date", df["start"].min().date())
+end_date = st.sidebar.date_input("End date", df["start"].max().date())
+selected_types = st.sidebar.multiselect("Workout types", df["type"].unique(), default=df["type"].unique())
 
 # Filter data
-if len(date_range) == 2:
-    df = df[(df["workout_start"].dt.date >= date_range[0]) & (df["workout_start"].dt.date <= date_range[1])]
-df = df[df["workout_type"].isin(workout_types)]
+mask = (
+    (df["start"].dt.date >= start_date) &
+    (df["start"].dt.date <= end_date) &
+    (df["type"].isin(selected_types))
+)
+df_filtered = df[mask]
 
-# Daily summary
-summary = df.groupby("date").agg(
-    workouts=("workout_type", "count"),
-    avg_hr=("avg_hr", "mean"),
-    max_hr=("max_hr", "mean"),
-    total_duration=("duration_min", "sum"),
-    total_calories=("calories", "sum"),
-    avg_output=("total_output_kj", "mean"),
-    avg_percentile=("leaderboard_percentile", "mean"),
-    afib_events=("afib_events", "sum")
-).fillna(0).reset_index()
+st.markdown(f"### {len(df_filtered)} workouts from {start_date} to {end_date}")
 
-# Charts
-st.subheader("📊 Daily Summary")
+# --- Daily stacked workout count ---
+daily_counts = df_filtered.groupby([df_filtered["start"].dt.date, "type"]).size().reset_index(name="count")
+chart_counts = alt.Chart(daily_counts).mark_bar().encode(
+    x=alt.X("start:T", title="Date"),
+    y=alt.Y("count:Q", stack="zero", title="Workout Count"),
+    color=alt.Color("type:N", legend=alt.Legend(title="Workout Type"))
+).properties(title="Daily Workout Count (stacked by type)", width=700)
 
-col1, col2 = st.columns(2)
-with col1:
-    st.metric("Total Workouts", int(summary['workouts'].sum()))
-    st.bar_chart(summary.set_index("date")[["workouts"]])
+st.altair_chart(chart_counts, use_container_width=True)
 
-with col2:
-    st.metric("Total AFib Events", int(summary['afib_events'].sum()))
-    st.bar_chart(summary.set_index("date")[["afib_events"]])
+# --- Duration ---
+daily_duration = df_filtered.groupby([df_filtered["start"].dt.date, "type"])['duration_min'].sum().reset_index()
+chart_duration = alt.Chart(daily_duration).mark_bar().encode(
+    x=alt.X("start:T", title="Date"),
+    y=alt.Y("duration_min:Q", stack="zero", title="Total Duration (min)"),
+    color=alt.Color("type:N", legend=None)
+).properties(title="Daily Duration (min)", width=700)
 
-col3, col4 = st.columns(2)
-with col3:
-    st.subheader("🔥 Calories Burned")
-    st.line_chart(summary.set_index("date")[["total_calories"]])
+st.altair_chart(chart_duration, use_container_width=True)
 
-with col4:
-    st.subheader("⚡ Output (kJ)")
-    st.line_chart(summary.set_index("date")[["avg_output"]])
+# --- Calories ---
+if "calories" in df_filtered.columns:
+    daily_calories = df_filtered.groupby([df_filtered["start"].dt.date, "type"])['calories'].sum().reset_index()
+    chart_calories = alt.Chart(daily_calories).mark_bar().encode(
+        x=alt.X("start:T", title="Date"),
+        y=alt.Y("calories:Q", stack="zero", title="Total Calories"),
+        color=alt.Color("type:N", legend=None)
+    ).properties(title="Daily Calories Burned", width=700)
 
-col5, col6 = st.columns(2)
-with col5:
-    st.subheader("🏅 Leaderboard Percentile")
-    st.line_chart(summary.set_index("date")[["avg_percentile"]])
+    st.altair_chart(chart_calories, use_container_width=True)
 
-with col6:
-    st.subheader("🕒 Workout Duration")
-    st.line_chart(summary.set_index("date")[["total_duration"]])
+# --- Avg Heart Rate ---
+if "avg_hr" in df_filtered.columns:
+    df_hr = df_filtered.dropna(subset=["avg_hr"])
+    daily_hr = df_hr.groupby([df_hr["start"].dt.date])['avg_hr'].mean().reset_index()
+    chart_hr = alt.Chart(daily_hr).mark_line(point=True).encode(
+        x=alt.X("start:T", title="Date"),
+        y=alt.Y("avg_hr:Q", title="Avg Heart Rate (bpm)")
+    ).properties(title="Daily Average Heart Rate", width=700)
 
-# Workout type distribution
-st.subheader("🧘 Workout Type Distribution")
-type_counts = df["workout_type"].value_counts()
-st.bar_chart(type_counts)
+    st.altair_chart(chart_hr, use_container_width=True)
+
+# --- Optional: Add table for drill-down ---
+with st.expander("Show full workout log"):
+    st.dataframe(df_filtered.sort_values("start", ascending=False))
